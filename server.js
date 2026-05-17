@@ -19,11 +19,11 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL || 'http://localhost:7880';
 // LiveKit Room Service
 let roomService = null;
 try {
-  roomService = new RoomServiceClient({
-    url: LIVEKIT_URL,
-    apiKey: LIVEKIT_API_KEY,
-    apiSecret: LIVEKIT_API_SECRET,
-  });
+  roomService = new RoomServiceClient(
+    LIVEKIT_URL,
+    LIVEKIT_API_KEY,
+    LIVEKIT_API_SECRET,
+  );
 } catch (error) {
   console.log('LiveKit room service not initialized:', error);
 }
@@ -325,40 +325,36 @@ app.post('/getToken', async (req, res) => {
     // Generate a unique identity for the user in the room
     const identity = `${userName}_${Math.random().toString(36).substring(7)}`;
 
-    // Allow user to publish audio only (for voice calls)
-    const capabilities = {
-      canPublish: ['audio'],
-      canSubscribe: true,
-      canPublishData: true,
-      grant: {
-        video: {
-          canJoin: true,
-          canPublish: true,
-          canSubscribe: true,
-        },
-      },
-    };
-
-    // Generate token with 24 hour expiry
-    const token = jwt.sign(
+    // Use AccessToken from livekit-server-sdk for proper token generation
+    const { AccessToken } = require('livekit-server-sdk');
+    
+    const token = new AccessToken(
+      LIVEKIT_API_KEY,
+      LIVEKIT_API_SECRET,
       {
-        sub: identity,
-        aud: 'livekit',
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
-        canJoin: roomName,
         identity: identity,
         name: userName,
-        attributes: { role: 'participant' },
-        meta: JSON.stringify({ roomName, userName }),
-      },
-      LIVEKIT_API_SECRET,
-      { algorithm: 'HS256' }
+      }
     );
+
+    // Add grants for the room
+    token.addGrant({
+      roomJoin: true,
+      room: roomName,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishAudio: true,
+      canPublishVideo: false, // Audio only for voice calls
+    });
+
+    // toJwt() returns a Promise in livekit-server-sdk v2.x — must await
+    const jwtToken = await token.toJwt();
+
+    console.log(`Token generated for identity: ${identity}`);
 
     res.json({ 
       status: 'success', 
-      token: token,
+      token: jwtToken,
       roomName: roomName,
       identity: identity,
       message: 'Token generated successfully' 
