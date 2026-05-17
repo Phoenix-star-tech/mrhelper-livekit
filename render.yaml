@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: mrhelper-backend
+    env: node
+    # Sets the root directory to the backend folder
+    rootDir: backend
+    # Command to install dependencies
+    buildCommand: npm install
+    # Command to start the server
+    startCommand: npm start
+    # Automatically define required environment variables for the deployment
+    envVars:
+      - key: NODE_VERSION
+        value: 18.0.0
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
