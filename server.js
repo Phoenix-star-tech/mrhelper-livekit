@@ -414,7 +414,21 @@ app.post('/sendCallNotification', async (req, res) => {
       return res.status(500).json({ error: 'Firebase Admin not initialized' });
     }
 
-    // Look up callee's FCM token from Supabase
+    // First try the new multi-device fcm_tokens table
+    let fcmTokens = [];
+    const fcmTokensResponse = await fetch(`${SUPABASE_URL}/rest/v1/fcm_tokens?user_id=eq.${calleeId}&select=fcm_token`, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    const fcmTokensData = await fcmTokensResponse.json();
+    if (fcmTokensData && fcmTokensData.length > 0) {
+      fcmTokens = fcmTokensData.map(t => t.fcm_token);
+    }
+
+    // Look up callee's FCM token from legacy users table
     const supabaseResponse = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${calleeId}&select=fcm_token,name`, {
       headers: {
         'apikey': SUPABASE_KEY,
@@ -424,19 +438,25 @@ app.post('/sendCallNotification', async (req, res) => {
     });
 
     const users = await supabaseResponse.json();
-    if (!users || users.length === 0 || !users[0].fcm_token) {
+    const calleeName = (users && users.length > 0) ? users[0].name : 'User';
+
+    if (users && users.length > 0 && users[0].fcm_token) {
+      if (!fcmTokens.includes(users[0].fcm_token)) {
+        fcmTokens.push(users[0].fcm_token);
+      }
+    }
+
+    if (fcmTokens.length === 0) {
       console.error('FCM token not found for user:', calleeId);
       return res.status(404).json({ error: 'FCM token not found for callee' });
     }
 
-    const fcmToken = users[0].fcm_token;
-    const calleeName = users[0].name || 'User';
-    console.log(`Sending call notification to ${calleeName} (token: ${fcmToken.substring(0, 15)}...)`);
+    console.log(`Sending call notification to ${calleeName} (tokens: ${fcmTokens.length})`);
 
     // Send a DATA-ONLY FCM message (NO 'notification' field)
     // This ensures the background handler ALWAYS fires on Android.
     const message = {
-      token: fcmToken,
+      tokens: fcmTokens,
       data: {
         screen: 'voice_call',
         order_id: orderId || '',
@@ -451,7 +471,7 @@ app.post('/sendCallNotification', async (req, res) => {
       },
     };
 
-    const fcmResponse = await admin.messaging().send(message);
+    const fcmResponse = await admin.messaging().sendMulticast(message);
     console.log('✅ FCM call notification sent:', fcmResponse);
 
     res.json({ success: true, messageId: fcmResponse });
@@ -474,7 +494,21 @@ app.post('/sendCallRejection', async (req, res) => {
       return res.status(500).json({ error: 'Firebase Admin not initialized' });
     }
 
-    // Look up caller's FCM token
+    // First try the new multi-device fcm_tokens table
+    let fcmTokens = [];
+    const fcmTokensResponse = await fetch(`${SUPABASE_URL}/rest/v1/fcm_tokens?user_id=eq.${callerId}&select=fcm_token`, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    const fcmTokensData = await fcmTokensResponse.json();
+    if (fcmTokensData && fcmTokensData.length > 0) {
+      fcmTokens = fcmTokensData.map(t => t.fcm_token);
+    }
+
+    // Look up caller's FCM token from legacy users table
     const supabaseResponse = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${callerId}&select=fcm_token`, {
       headers: {
         'apikey': SUPABASE_KEY,
@@ -484,12 +518,18 @@ app.post('/sendCallRejection', async (req, res) => {
     });
 
     const users = await supabaseResponse.json();
-    if (!users || users.length === 0 || !users[0].fcm_token) {
+    if (users && users.length > 0 && users[0].fcm_token) {
+      if (!fcmTokens.includes(users[0].fcm_token)) {
+        fcmTokens.push(users[0].fcm_token);
+      }
+    }
+
+    if (fcmTokens.length === 0) {
       return res.status(404).json({ error: 'FCM token not found for caller' });
     }
 
     const message = {
-      token: users[0].fcm_token,
+      tokens: fcmTokens,
       data: {
         screen: 'call_rejected',
         order_id: orderId || '',
@@ -501,11 +541,80 @@ app.post('/sendCallRejection', async (req, res) => {
       },
     };
 
-    const fcmResponse = await admin.messaging().send(message);
+    const fcmResponse = await admin.messaging().sendMulticast(message);
     console.log('✅ Call rejection sent:', fcmResponse);
     res.json({ success: true, messageId: fcmResponse });
   } catch (error) {
     console.error('❌ Error sending call rejection:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint to send call cancellation (caller hangs up before pickup)
+app.post('/sendCallCancellation', async (req, res) => {
+  try {
+    const { calleeId, orderId } = req.body;
+
+    if (!calleeId) {
+      return res.status(400).json({ error: 'calleeId is required' });
+    }
+
+    if (!admin.apps.length) {
+      return res.status(500).json({ error: 'Firebase Admin not initialized' });
+    }
+
+    // First try the new multi-device fcm_tokens table
+    let fcmTokens = [];
+    const fcmTokensResponse = await fetch(`${SUPABASE_URL}/rest/v1/fcm_tokens?user_id=eq.${calleeId}&select=fcm_token`, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    const fcmTokensData = await fcmTokensResponse.json();
+    if (fcmTokensData && fcmTokensData.length > 0) {
+      fcmTokens = fcmTokensData.map(t => t.fcm_token);
+    }
+
+    // Look up callee's FCM token from legacy users table
+    const supabaseResponse = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${calleeId}&select=fcm_token`, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const users = await supabaseResponse.json();
+    if (users && users.length > 0 && users[0].fcm_token) {
+      if (!fcmTokens.includes(users[0].fcm_token)) {
+        fcmTokens.push(users[0].fcm_token);
+      }
+    }
+
+    if (fcmTokens.length === 0) {
+      return res.status(404).json({ error: 'FCM token not found for callee' });
+    }
+
+    const message = {
+      tokens: fcmTokens,
+      data: {
+        screen: 'call_cancelled',
+        order_id: orderId || '',
+        title: 'Call Cancelled',
+        body: 'The caller hung up.',
+      },
+      android: {
+        priority: 'high',
+      },
+    };
+
+    const fcmResponse = await admin.messaging().sendMulticast(message);
+    console.log('✅ Call cancellation sent:', fcmResponse);
+    res.json({ success: true, messageId: fcmResponse });
+  } catch (error) {
+    console.error('❌ Error sending call cancellation:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
