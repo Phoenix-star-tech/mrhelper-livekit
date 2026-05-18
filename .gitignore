@@ -7,3 +7,5 @@ env/
 venv/
 .env
 node_modules/
+firebase-service-account.json
+google-service-account.json

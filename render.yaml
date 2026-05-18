@@ -22,3 +22,5 @@ services:
         sync: false
       - key: SUPABASE_KEY
         sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false

@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const { RoomServiceClient } = require('livekit-server-sdk');
+const admin = require('firebase-admin');
 require('dotenv').config();
 
 const app = express();
@@ -35,6 +36,32 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6Ik
 // Google Play Config
 const GOOGLE_PLAY_PACKAGE_NAME = process.env.GOOGLE_PLAY_PACKAGE_NAME || 'com.mrhelper.app';
 const GOOGLE_SERVICE_ACCOUNT_KEY_PATH = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || 'google-service-account.json';
+
+// Firebase Admin SDK Initialization
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    // Production: Base64-encoded service account JSON from env var
+    const serviceAccount = JSON.parse(
+      Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, 'base64').toString('utf8')
+    );
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    console.log('Firebase Admin SDK initialized from env var');
+  } else if (fs.existsSync('firebase-service-account.json')) {
+    // Local dev: service account JSON file
+    const serviceAccount = JSON.parse(fs.readFileSync('firebase-service-account.json', 'utf8'));
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    console.log('Firebase Admin SDK initialized from local file');
+  } else {
+    console.warn('⚠️ Firebase Admin SDK NOT initialized: No service account found.');
+    console.warn('   Set FIREBASE_SERVICE_ACCOUNT env var (base64) or place firebase-service-account.json locally.');
+  }
+} catch (firebaseError) {
+  console.error('Firebase Admin SDK initialization error:', firebaseError.message);
+}
 
 /**
  * Get an OAuth2 access token using Google service account credentials.
@@ -368,8 +395,124 @@ app.post('/getToken', async (req, res) => {
   }
 });
 
+// =========================================================
+// VOICE CALL NOTIFICATION ENDPOINT
+// Sends a DATA-ONLY FCM message so the background handler
+// always fires and can show the native CallKit incoming call screen.
+// =========================================================
+app.post('/sendCallNotification', async (req, res) => {
+  try {
+    const { calleeId, callerName, orderId, callerId } = req.body;
+
+    if (!calleeId) {
+      return res.status(400).json({ error: 'calleeId is required' });
+    }
+
+    // Check if Firebase Admin is initialized
+    if (!admin.apps.length) {
+      console.error('Firebase Admin SDK not initialized');
+      return res.status(500).json({ error: 'Firebase Admin not initialized' });
+    }
+
+    // Look up callee's FCM token from Supabase
+    const supabaseResponse = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${calleeId}&select=fcm_token,name`, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const users = await supabaseResponse.json();
+    if (!users || users.length === 0 || !users[0].fcm_token) {
+      console.error('FCM token not found for user:', calleeId);
+      return res.status(404).json({ error: 'FCM token not found for callee' });
+    }
+
+    const fcmToken = users[0].fcm_token;
+    const calleeName = users[0].name || 'User';
+    console.log(`Sending call notification to ${calleeName} (token: ${fcmToken.substring(0, 15)}...)`);
+
+    // Send a DATA-ONLY FCM message (NO 'notification' field)
+    // This ensures the background handler ALWAYS fires on Android.
+    const message = {
+      token: fcmToken,
+      data: {
+        screen: 'voice_call',
+        order_id: orderId || '',
+        caller_name: callerName || 'Someone',
+        caller_id: callerId || '',
+        title: 'Incoming Voice Call',
+        body: `${callerName || 'Someone'} is calling you`,
+      },
+      android: {
+        priority: 'high',
+        ttl: 30000,
+      },
+    };
+
+    const fcmResponse = await admin.messaging().send(message);
+    console.log('✅ FCM call notification sent:', fcmResponse);
+
+    res.json({ success: true, messageId: fcmResponse });
+  } catch (error) {
+    console.error('❌ Error sending call notification:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint to send call rejection back to the caller
+app.post('/sendCallRejection', async (req, res) => {
+  try {
+    const { callerId, orderId } = req.body;
+
+    if (!callerId) {
+      return res.status(400).json({ error: 'callerId is required' });
+    }
+
+    if (!admin.apps.length) {
+      return res.status(500).json({ error: 'Firebase Admin not initialized' });
+    }
+
+    // Look up caller's FCM token
+    const supabaseResponse = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${callerId}&select=fcm_token`, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const users = await supabaseResponse.json();
+    if (!users || users.length === 0 || !users[0].fcm_token) {
+      return res.status(404).json({ error: 'FCM token not found for caller' });
+    }
+
+    const message = {
+      token: users[0].fcm_token,
+      data: {
+        screen: 'call_rejected',
+        order_id: orderId || '',
+        title: 'Call Rejected',
+        body: 'The recipient declined your call.',
+      },
+      android: {
+        priority: 'high',
+      },
+    };
+
+    const fcmResponse = await admin.messaging().send(message);
+    console.log('✅ Call rejection sent:', fcmResponse);
+    res.json({ success: true, messageId: fcmResponse });
+  } catch (error) {
+    console.error('❌ Error sending call rejection:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     console.log(`LiveKit token endpoint available at: POST /getToken`);
+    console.log(`Call notification endpoint at: POST /sendCallNotification`);
 });
