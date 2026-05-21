@@ -294,14 +294,46 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL || 'wss://mr-helper-t6v5dsu9.livekit
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'APIP2CezGzUaWU2';
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'M00bbcggOQ9bLRA81y8793QAsedGAemXeT8o6UAgvYZA';
 
-// Initialize Firebase Admin SDK using the same google-services/service account json
+// Initialize Firebase Admin SDK
+// Supports: FIREBASE_SERVICE_ACCOUNT (Base64 or raw JSON), FIREBASE_SERVICE_ACCOUNT_JSON, or file fallback
 try {
     let serviceAccount;
-    if (fs.existsSync(GOOGLE_SERVICE_ACCOUNT_KEY_PATH)) {
-        const fileContent = fs.readFileSync(GOOGLE_SERVICE_ACCOUNT_KEY_PATH, 'utf-8');
-        serviceAccount = JSON.parse(fileContent);
-    } else if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-        serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+
+    // 1. Try FIREBASE_SERVICE_ACCOUNT env var (Base64-encoded or raw JSON)
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+        try {
+            const val = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
+            if (val.startsWith('{')) {
+                serviceAccount = JSON.parse(val);
+            } else {
+                const decoded = Buffer.from(val, 'base64').toString('utf8');
+                serviceAccount = JSON.parse(decoded);
+            }
+            console.log('Loaded Firebase credentials from FIREBASE_SERVICE_ACCOUNT env var.');
+        } catch (e) {
+            console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT env var:', e.message);
+        }
+    }
+
+    // 2. Fallback: FIREBASE_SERVICE_ACCOUNT_JSON env var (raw JSON)
+    if (!serviceAccount && process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+        try {
+            serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+            console.log('Loaded Firebase credentials from FIREBASE_SERVICE_ACCOUNT_JSON env var.');
+        } catch (e) {
+            console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT_JSON env var:', e.message);
+        }
+    }
+
+    // 3. Fallback: physical file on disk
+    if (!serviceAccount && fs.existsSync(GOOGLE_SERVICE_ACCOUNT_KEY_PATH)) {
+        try {
+            const fileContent = fs.readFileSync(GOOGLE_SERVICE_ACCOUNT_KEY_PATH, 'utf-8');
+            serviceAccount = JSON.parse(fileContent);
+            console.log('Loaded Firebase credentials from file:', GOOGLE_SERVICE_ACCOUNT_KEY_PATH);
+        } catch (e) {
+            console.error('Failed to parse service account file:', e.message);
+        }
     }
 
     if (serviceAccount) {
