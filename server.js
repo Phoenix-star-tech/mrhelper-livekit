@@ -319,7 +319,7 @@ try {
 /**
  * Generate LiveKit token for a user joining a room
  */
-function generateLiveKitToken(roomName, identity, userName) {
+async function generateLiveKitToken(roomName, identity, userName) {
     const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
         identity: identity,
         name: userName,
@@ -331,7 +331,7 @@ function generateLiveKitToken(roomName, identity, userName) {
         canSubscribe: true,
         canPublishData: true,
     });
-    return at.toJwt();
+    return await at.toJwt();
 }
 
 /**
@@ -424,7 +424,7 @@ app.post('/startCall', async (req, res) => {
 
         console.log(`[Call API] StartCall from ${callerName} to receiver ${receiverId}`);
 
-        const token = generateLiveKitToken(roomId, callerId, callerName);
+        const token = await generateLiveKitToken(roomId, callerId, callerName);
 
         const { data: receiverProfile } = await supabase
             .from('users')
@@ -518,7 +518,7 @@ app.post('/getToken', async (req, res) => {
             return res.status(400).json({ status: 'error', message: 'Missing parameters' });
         }
 
-        const token = generateLiveKitToken(roomId, userId, userName);
+        const token = await generateLiveKitToken(roomId, userId, userName);
 
         const { data: activeCall } = await supabase
             .from('call_history')
