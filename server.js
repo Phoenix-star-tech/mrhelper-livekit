@@ -3,8 +3,9 @@ const cors = require('cors');
 const crypto = require('crypto');
 const fs = require('fs');
 const jwt = require('jsonwebtoken');
-const { RoomServiceClient } = require('livekit-server-sdk');
 const admin = require('firebase-admin');
+const { AccessToken } = require('livekit-server-sdk');
+const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const app = express();
@@ -12,56 +13,14 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// LiveKit Configuration
-const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'your_livekit_api_key';
-const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'your_livekit_api_secret';
-const LIVEKIT_URL = process.env.LIVEKIT_URL || 'http://localhost:7880';
-
-// LiveKit Room Service
-let roomService = null;
-try {
-  roomService = new RoomServiceClient(
-    LIVEKIT_URL,
-    LIVEKIT_API_KEY,
-    LIVEKIT_API_SECRET,
-  );
-} catch (error) {
-  console.log('LiveKit room service not initialized:', error);
-}
-
 // Supabase Config
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://supabase-deep.phoenixsoftwaresolutions172.workers.dev';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ2cnBzcWRyYndmdmxsZWx5cWhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxNTgxOTksImV4cCI6MjA4MDczNDE5OX0.ON2ioqbNJegKOWeGu_eqsgjNxQ6IdHCDuFRqjUfBYHk';
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // Google Play Config
 const GOOGLE_PLAY_PACKAGE_NAME = process.env.GOOGLE_PLAY_PACKAGE_NAME || 'com.mrhelper.app';
 const GOOGLE_SERVICE_ACCOUNT_KEY_PATH = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || 'google-service-account.json';
-
-// Firebase Admin SDK Initialization
-try {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    // Production: Base64-encoded service account JSON from env var
-    const serviceAccount = JSON.parse(
-      Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, 'base64').toString('utf8')
-    );
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-    console.log('Firebase Admin SDK initialized from env var');
-  } else if (fs.existsSync('firebase-service-account.json')) {
-    // Local dev: service account JSON file
-    const serviceAccount = JSON.parse(fs.readFileSync('firebase-service-account.json', 'utf8'));
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-    console.log('Firebase Admin SDK initialized from local file');
-  } else {
-    console.warn('⚠️ Firebase Admin SDK NOT initialized: No service account found.');
-    console.warn('   Set FIREBASE_SERVICE_ACCOUNT env var (base64) or place firebase-service-account.json locally.');
-  }
-} catch (firebaseError) {
-  console.error('Firebase Admin SDK initialization error:', firebaseError.message);
-}
 
 /**
  * Get an OAuth2 access token using Google service account credentials.
@@ -330,298 +289,414 @@ app.post('/webhook/google-play', (req, res) => {
     }
 });
 
-// 3. Health Check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'mr-helper-backend', billing: 'google_play' });
-});
+// LiveKit Config
+const LIVEKIT_URL = process.env.LIVEKIT_URL || 'wss://mr-helper-t6v5dsu9.livekit.cloud';
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'APIP2CezGzUaWU2';
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'M00bbcggOQ9bLRA81y8793QAsedGAemXeT8o6UAgvYZA';
 
-// 4. Get LiveKit Token (for voice calling)
-app.post('/getToken', async (req, res) => {
-  try {
-    const { roomName, userName } = req.body;
-
-    if (!roomName || !userName) {
-      return res.status(400).json({ 
-        status: 'error', 
-        message: 'Missing required fields: roomName and userName' 
-      });
+// Initialize Firebase Admin SDK using the same google-services/service account json
+try {
+    let serviceAccount;
+    if (fs.existsSync(GOOGLE_SERVICE_ACCOUNT_KEY_PATH)) {
+        const fileContent = fs.readFileSync(GOOGLE_SERVICE_ACCOUNT_KEY_PATH, 'utf-8');
+        serviceAccount = JSON.parse(fileContent);
+    } else if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+        serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
     }
 
-    console.log(`Generating LiveKit token for room: ${roomName}, user: ${userName}`);
+    if (serviceAccount) {
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+        console.log('Firebase Admin SDK initialized successfully.');
+    } else {
+        console.warn('WARNING: Firebase Service Account Key not found. Push notifications will fail.');
+    }
+} catch (error) {
+    console.error('Error initializing Firebase Admin:', error);
+}
 
-    // Generate a unique identity for the user in the room
-    const identity = `${userName}_${Math.random().toString(36).substring(7)}`;
-
-    // Use AccessToken from livekit-server-sdk for proper token generation
-    const { AccessToken } = require('livekit-server-sdk');
-    
-    const token = new AccessToken(
-      LIVEKIT_API_KEY,
-      LIVEKIT_API_SECRET,
-      {
+/**
+ * Generate LiveKit token for a user joining a room
+ */
+function generateLiveKitToken(roomName, identity, userName) {
+    const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
         identity: identity,
         name: userName,
-      }
-    );
-
-    // Add grants for the room
-    token.addGrant({
-      roomJoin: true,
-      room: roomName,
-      canPublish: true,
-      canSubscribe: true,
-      canPublishAudio: true,
-      canPublishVideo: false, // Audio only for voice calls
     });
-
-    // toJwt() returns a Promise in livekit-server-sdk v2.x — must await
-    const jwtToken = await token.toJwt();
-
-    console.log(`Token generated for identity: ${identity}`);
-
-    res.json({ 
-      status: 'success', 
-      token: jwtToken,
-      roomName: roomName,
-      identity: identity,
-      message: 'Token generated successfully' 
+    at.addGrant({
+        roomJoin: true,
+        room: roomName,
+        canPublish: true,
+        canSubscribe: true,
+        canPublishData: true,
     });
-  } catch (error) {
-    console.error('Error generating LiveKit token:', error);
-    res.status(500).json({ 
-      status: 'error', 
-      message: error.message 
-    });
-  }
-});
+    return at.toJwt();
+}
 
-// =========================================================
-// VOICE CALL NOTIFICATION ENDPOINT
-// Sends a DATA-ONLY FCM message so the background handler
-// always fires and can show the native CallKit incoming call screen.
-// =========================================================
-app.post('/sendCallNotification', async (req, res) => {
-  try {
-    const { calleeId, callerName, orderId, callerId } = req.body;
-
-    if (!calleeId) {
-      return res.status(400).json({ error: 'calleeId is required' });
-    }
-
-    // Check if Firebase Admin is initialized
+/**
+ * Helper to send FCM Push Notification
+ */
+async function sendFCMNotification(token, dataPayload) {
     if (!admin.apps.length) {
-      console.error('Firebase Admin SDK not initialized');
-      return res.status(500).json({ error: 'Firebase Admin not initialized' });
+        console.warn('FCM not initialized. Skipping push.');
+        return false;
     }
-
-    // First try the new multi-device fcm_tokens table
-    let fcmTokens = [];
-    const fcmTokensResponse = await fetch(`${SUPABASE_URL}/rest/v1/fcm_tokens?user_id=eq.${calleeId}&select=fcm_token`, {
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
-    const fcmTokensData = await fcmTokensResponse.json();
-    if (fcmTokensData && fcmTokensData.length > 0) {
-      fcmTokens = fcmTokensData.map(t => t.fcm_token);
-    }
-
-    // Look up callee's FCM token from legacy users table
-    const supabaseResponse = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${calleeId}&select=fcm_token,name`, {
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    const users = await supabaseResponse.json();
-    const calleeName = (users && users.length > 0) ? users[0].name : 'User';
-
-    if (users && users.length > 0 && users[0].fcm_token) {
-      if (!fcmTokens.includes(users[0].fcm_token)) {
-        fcmTokens.push(users[0].fcm_token);
-      }
-    }
-
-    if (fcmTokens.length === 0) {
-      console.error('FCM token not found for user:', calleeId);
-      return res.status(404).json({ error: 'FCM token not found for callee' });
-    }
-
-    console.log(`Sending call notification to ${calleeName} (tokens: ${fcmTokens.length})`);
-
-    // Send a DATA-ONLY FCM message (NO 'notification' field)
-    // This ensures the background handler ALWAYS fires on Android.
+    
     const message = {
-      tokens: fcmTokens,
-      data: {
-        screen: 'voice_call',
-        order_id: orderId || '',
-        caller_name: callerName || 'Someone',
-        caller_id: callerId || '',
-        title: 'Incoming Voice Call',
-        body: `${callerName || 'Someone'} is calling you`,
-      },
-      android: {
-        priority: 'high',
-        ttl: 30000,
-      },
+        token: token,
+        data: dataPayload,
+        android: {
+            priority: 'high',
+            ttl: 0,
+        },
+        apns: {
+            headers: {
+                'apns-priority': '10',
+                'apns-push-type': 'background',
+            },
+            payload: {
+                aps: {
+                    contentAvailable: true,
+                }
+            }
+        }
     };
 
-    const fcmResponse = await admin.messaging().sendMulticast(message);
-    console.log('✅ FCM call notification sent:', fcmResponse);
+    try {
+        const response = await admin.messaging().send(message);
+        console.log('FCM Notification sent successfully:', response);
+        return true;
+    } catch (error) {
+        console.error('Error sending FCM notification:', error);
+        return false;
+    }
+}
 
-    res.json({ success: true, messageId: fcmResponse });
-  } catch (error) {
-    console.error('❌ Error sending call notification:', error.message);
-    res.status(500).json({ error: error.message });
-  }
+/**
+ * Helper to query all active FCM tokens for a user
+ */
+async function getUserFCMTokens(userId) {
+    try {
+        const { data, error } = await supabase
+            .from('user_fcm_tokens')
+            .select('fcm_token')
+            .eq('user_id', userId)
+            .eq('is_active', true);
+            
+        if (error) {
+            console.error('Supabase query error for FCM tokens:', error);
+            return [];
+        }
+        
+        const tokens = data.map(row => row.fcm_token);
+        
+        if (tokens.length === 0) {
+            const { data: userRecord, error: userError } = await supabase
+                .from('users')
+                .select('fcm_token')
+                .eq('id', userId)
+                .single();
+                
+            if (!userError && userRecord && userRecord.fcm_token) {
+                tokens.push(userRecord.fcm_token);
+            }
+        }
+        
+        return tokens;
+    } catch (e) {
+        console.error('Error getting FCM tokens:', e);
+        return [];
+    }
+}
+
+// ==========================================
+// VOICE CALLING API ENDPOINTS
+// ==========================================
+
+app.post('/startCall', async (req, res) => {
+    try {
+        const { callerId, receiverId, roomId, callerName, receiverFCMToken } = req.body;
+
+        if (!callerId || !receiverId || !roomId || !callerName) {
+            return res.status(400).json({ status: 'error', message: 'Missing required parameters' });
+        }
+
+        console.log(`[Call API] StartCall from ${callerName} to receiver ${receiverId}`);
+
+        const token = generateLiveKitToken(roomId, callerId, callerName);
+
+        const { data: receiverProfile } = await supabase
+            .from('users')
+            .select('full_name, avatar_url')
+            .eq('id', receiverId)
+            .single();
+
+        const receiverName = receiverProfile ? receiverProfile.full_name : 'User';
+        const receiverAvatar = receiverProfile ? receiverProfile.avatar_url : '';
+
+        const { data: callerProfile } = await supabase
+            .from('users')
+            .select('avatar_url')
+            .eq('id', callerId)
+            .single();
+        const callerAvatar = callerProfile ? callerProfile.avatar_url : '';
+
+        let orderId = null;
+        if (roomId.startsWith('room_')) {
+            const parsedId = roomId.replace('room_', '');
+            const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (uuidRegex.test(parsedId)) {
+                orderId = parsedId;
+            }
+        }
+
+        const { data: callHistory, error: dbError } = await supabase
+            .from('call_history')
+            .insert({
+                order_id: orderId,
+                caller_id: callerId,
+                receiver_id: receiverId,
+                status: 'ringing',
+                duration: 0
+            })
+            .select()
+            .single();
+
+        if (dbError) {
+            console.error('Error inserting call history record:', dbError);
+        }
+        
+        const callId = callHistory ? callHistory.id : crypto.randomUUID();
+
+        const payload = {
+            type: 'incoming_call',
+            callId: callId,
+            callerId: callerId,
+            callerName: callerName,
+            callerAvatar: callerAvatar || '',
+            roomId: roomId,
+            receiverId: receiverId,
+            orderId: orderId || ''
+        };
+
+        let targetTokens = await getUserFCMTokens(receiverId);
+        if (targetTokens.length === 0 && receiverFCMToken) {
+            targetTokens.push(receiverFCMToken);
+        }
+
+        let notificationSent = false;
+        if (targetTokens.length > 0) {
+            const sendPromises = targetTokens.map(fcmToken => sendFCMNotification(fcmToken, payload));
+            const results = await Promise.all(sendPromises);
+            notificationSent = results.some(r => r === true);
+        }
+
+        res.json({
+            status: 'success',
+            message: 'Call initialized successfully',
+            token: token,
+            callId: callId,
+            roomId: roomId,
+            livekitUrl: LIVEKIT_URL,
+            notificationSent: notificationSent,
+            receiverName: receiverName,
+            receiverAvatar: receiverAvatar
+        });
+
+    } catch (error) {
+        console.error('Error in /startCall:', error);
+        res.status(500).json({ status: 'error', message: error.message });
+    }
 });
 
-// Endpoint to send call rejection back to the caller
-app.post('/sendCallRejection', async (req, res) => {
-  try {
-    const { callerId, orderId } = req.body;
+app.post('/getToken', async (req, res) => {
+    try {
+        const { userId, roomId, userName } = req.body;
 
-    if (!callerId) {
-      return res.status(400).json({ error: 'callerId is required' });
+        if (!userId || !roomId || !userName) {
+            return res.status(400).json({ status: 'error', message: 'Missing parameters' });
+        }
+
+        const token = generateLiveKitToken(roomId, userId, userName);
+
+        const { data: activeCall } = await supabase
+            .from('call_history')
+            .select('id')
+            .eq('receiver_id', userId)
+            .eq('status', 'ringing')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single();
+
+        if (activeCall) {
+            await supabase
+                .from('call_history')
+                .update({ status: 'connected' })
+                .eq('id', activeCall.id);
+        }
+
+        res.json({
+            status: 'success',
+            token: token,
+            livekitUrl: LIVEKIT_URL,
+            callId: activeCall ? activeCall.id : null
+        });
+
+    } catch (error) {
+        console.error('Error in /getToken:', error);
+        res.status(500).json({ status: 'error', message: error.message });
     }
-
-    if (!admin.apps.length) {
-      return res.status(500).json({ error: 'Firebase Admin not initialized' });
-    }
-
-    // First try the new multi-device fcm_tokens table
-    let fcmTokens = [];
-    const fcmTokensResponse = await fetch(`${SUPABASE_URL}/rest/v1/fcm_tokens?user_id=eq.${callerId}&select=fcm_token`, {
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
-    const fcmTokensData = await fcmTokensResponse.json();
-    if (fcmTokensData && fcmTokensData.length > 0) {
-      fcmTokens = fcmTokensData.map(t => t.fcm_token);
-    }
-
-    // Look up caller's FCM token from legacy users table
-    const supabaseResponse = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${callerId}&select=fcm_token`, {
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    const users = await supabaseResponse.json();
-    if (users && users.length > 0 && users[0].fcm_token) {
-      if (!fcmTokens.includes(users[0].fcm_token)) {
-        fcmTokens.push(users[0].fcm_token);
-      }
-    }
-
-    if (fcmTokens.length === 0) {
-      return res.status(404).json({ error: 'FCM token not found for caller' });
-    }
-
-    const message = {
-      tokens: fcmTokens,
-      data: {
-        screen: 'call_rejected',
-        order_id: orderId || '',
-        title: 'Call Rejected',
-        body: 'The recipient declined your call.',
-      },
-      android: {
-        priority: 'high',
-      },
-    };
-
-    const fcmResponse = await admin.messaging().sendMulticast(message);
-    console.log('✅ Call rejection sent:', fcmResponse);
-    res.json({ success: true, messageId: fcmResponse });
-  } catch (error) {
-    console.error('❌ Error sending call rejection:', error.message);
-    res.status(500).json({ error: error.message });
-  }
 });
 
-// Endpoint to send call cancellation (caller hangs up before pickup)
-app.post('/sendCallCancellation', async (req, res) => {
-  try {
-    const { calleeId, orderId } = req.body;
+app.post('/rejectCall', async (req, res) => {
+    try {
+        const { roomId, callId, rejectedBy } = req.body;
 
-    if (!calleeId) {
-      return res.status(400).json({ error: 'calleeId is required' });
+        if (!roomId || !rejectedBy) {
+            return res.status(400).json({ status: 'error', message: 'Missing parameters' });
+        }
+
+        let targetCallId = callId;
+        let callerId = null;
+
+        if (targetCallId) {
+            const { data: updatedCall } = await supabase
+                .from('call_history')
+                .update({ status: 'rejected', ended_at: new Date().toISOString() })
+                .eq('id', targetCallId)
+                .select('caller_id')
+                .single();
+
+            if (updatedCall) {
+                callerId = updatedCall.caller_id;
+            }
+        } else {
+            const { data: activeCall } = await supabase
+                .from('call_history')
+                .select('*')
+                .eq('status', 'ringing')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .single();
+
+            if (activeCall) {
+                targetCallId = activeCall.id;
+                callerId = activeCall.caller_id;
+                await supabase
+                    .from('call_history')
+                    .update({ status: 'rejected', ended_at: new Date().toISOString() })
+                    .eq('id', activeCall.id);
+            }
+        }
+
+        if (callerId) {
+            const callerTokens = await getUserFCMTokens(callerId);
+            const payload = {
+                type: 'call_rejected',
+                roomId: roomId,
+                callId: targetCallId || '',
+                rejectedBy: rejectedBy
+            };
+
+            if (callerTokens.length > 0) {
+                await Promise.all(callerTokens.map(token => sendFCMNotification(token, payload)));
+            }
+        }
+
+        res.json({ status: 'success', message: 'Call rejection processed' });
+
+    } catch (error) {
+        console.error('Error in /rejectCall:', error);
+        res.status(500).json({ status: 'error', message: error.message });
     }
+});
 
-    if (!admin.apps.length) {
-      return res.status(500).json({ error: 'Firebase Admin not initialized' });
+app.post('/endCall', async (req, res) => {
+    try {
+        const { roomId, callId, endedBy, duration } = req.body;
+
+        if (!roomId || !endedBy) {
+            return res.status(400).json({ status: 'error', message: 'Missing parameters' });
+        }
+
+        const callDuration = parseInt(duration || 0);
+
+        let targetCallId = callId;
+        let callerId = null;
+        let receiverId = null;
+
+        if (targetCallId) {
+            const { data: updatedCall } = await supabase
+                .from('call_history')
+                .update({ 
+                    status: 'completed', 
+                    duration: callDuration,
+                    ended_at: new Date().toISOString() 
+                })
+                .eq('id', targetCallId)
+                .select('caller_id, receiver_id')
+                .single();
+
+            if (updatedCall) {
+                callerId = updatedCall.caller_id;
+                receiverId = updatedCall.receiver_id;
+            }
+        } else {
+            const { data: activeCall } = await supabase
+                .from('call_history')
+                .select('*')
+                .in('status', ['connected', 'ringing'])
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .single();
+
+            if (activeCall) {
+                targetCallId = activeCall.id;
+                callerId = activeCall.caller_id;
+                receiverId = activeCall.receiver_id;
+                await supabase
+                    .from('call_history')
+                    .update({ 
+                        status: 'completed', 
+                        duration: callDuration,
+                        ended_at: new Date().toISOString() 
+                    })
+                    .eq('id', activeCall.id);
+            }
+        }
+
+        const otherUserId = (endedBy === callerId) ? receiverId : callerId;
+
+        if (otherUserId) {
+            const otherUserTokens = await getUserFCMTokens(otherUserId);
+            const payload = {
+                type: 'call_ended',
+                roomId: roomId,
+                callId: targetCallId || '',
+                endedBy: endedBy,
+                duration: callDuration.toString()
+            };
+
+            if (otherUserTokens.length > 0) {
+                await Promise.all(otherUserTokens.map(token => sendFCMNotification(token, payload)));
+            }
+        }
+
+        res.json({ status: 'success', message: 'Call ended processed successfully' });
+
+    } catch (error) {
+        console.error('Error in /endCall:', error);
+        res.status(500).json({ status: 'error', message: error.message });
     }
+});
 
-    // First try the new multi-device fcm_tokens table
-    let fcmTokens = [];
-    const fcmTokensResponse = await fetch(`${SUPABASE_URL}/rest/v1/fcm_tokens?user_id=eq.${calleeId}&select=fcm_token`, {
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
-    const fcmTokensData = await fcmTokensResponse.json();
-    if (fcmTokensData && fcmTokensData.length > 0) {
-      fcmTokens = fcmTokensData.map(t => t.fcm_token);
-    }
-
-    // Look up callee's FCM token from legacy users table
-    const supabaseResponse = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${calleeId}&select=fcm_token`, {
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    const users = await supabaseResponse.json();
-    if (users && users.length > 0 && users[0].fcm_token) {
-      if (!fcmTokens.includes(users[0].fcm_token)) {
-        fcmTokens.push(users[0].fcm_token);
-      }
-    }
-
-    if (fcmTokens.length === 0) {
-      return res.status(404).json({ error: 'FCM token not found for callee' });
-    }
-
-    const message = {
-      tokens: fcmTokens,
-      data: {
-        screen: 'call_cancelled',
-        order_id: orderId || '',
-        title: 'Call Cancelled',
-        body: 'The caller hung up.',
-      },
-      android: {
-        priority: 'high',
-      },
-    };
-
-    const fcmResponse = await admin.messaging().sendMulticast(message);
-    console.log('✅ Call cancellation sent:', fcmResponse);
-    res.json({ success: true, messageId: fcmResponse });
-  } catch (error) {
-    console.error('❌ Error sending call cancellation:', error.message);
-    res.status(500).json({ error: error.message });
-  }
+// 3. Health Check
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', service: 'mr-helper-backend', billing: 'google_play' });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    console.log(`LiveKit token endpoint available at: POST /getToken`);
-    console.log(`Call notification endpoint at: POST /sendCallNotification`);
 });
