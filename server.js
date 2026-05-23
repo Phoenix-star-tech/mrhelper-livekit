@@ -591,6 +591,68 @@ app.post('/getToken', async (req, res) => {
         res.status(500).json({ status: 'error', message: error.message });
     }
 });
+app.post('/missedCall', async (req, res) => {
+    try {
+        const { roomId, callId, missedBy } = req.body;
+
+        if (!roomId || !missedBy) {
+            return res.status(400).json({ status: 'error', message: 'Missing parameters' });
+        }
+
+        let targetCallId = callId;
+        let callerId = null;
+
+        if (targetCallId) {
+            const { data: updatedCall } = await supabase
+                .from('call_history')
+                .update({ status: 'missed', ended_at: new Date().toISOString() })
+                .eq('id', targetCallId)
+                .select('caller_id')
+                .single();
+
+            if (updatedCall) {
+                callerId = updatedCall.caller_id;
+            }
+        } else {
+            const { data: activeCall } = await supabase
+                .from('call_history')
+                .select('*')
+                .eq('status', 'ringing')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .single();
+
+            if (activeCall) {
+                targetCallId = activeCall.id;
+                callerId = activeCall.caller_id;
+                await supabase
+                    .from('call_history')
+                    .update({ status: 'missed', ended_at: new Date().toISOString() })
+                    .eq('id', activeCall.id);
+            }
+        }
+
+        if (callerId) {
+            const callerTokens = await getUserFCMTokens(callerId);
+            const payload = {
+                type: 'call_missed',
+                roomId: roomId,
+                callId: targetCallId || '',
+                missedBy: missedBy
+            };
+
+            if (callerTokens.length > 0) {
+                await Promise.all(callerTokens.map(token => sendFCMNotification(token, payload)));
+            }
+        }
+
+        res.json({ status: 'success', message: 'Missed call processed' });
+
+    } catch (error) {
+        console.error('Error in /missedCall:', error);
+        res.status(500).json({ status: 'error', message: error.message });
+    }
+});
 
 app.post('/rejectCall', async (req, res) => {
     try {
