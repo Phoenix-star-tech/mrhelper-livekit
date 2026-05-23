@@ -385,7 +385,7 @@ async function sendFCMNotification(token, dataPayload) {
         apns: {
             headers: {
                 'apns-priority': '10',
-                'apns-push-type': 'background',
+                'apns-push-type': 'voip',
             },
             payload: {
                 aps: {
@@ -448,13 +448,18 @@ async function getUserFCMTokens(userId) {
 
 app.post('/startCall', async (req, res) => {
     try {
-        const { callerId, receiverId, roomId, callerName, receiverFCMToken } = req.body;
+        const { callerId, receiverId, roomId, callerName, receiverName: clientReceiverName, receiverFCMToken } = req.body;
 
         if (!callerId || !receiverId || !roomId || !callerName) {
             return res.status(400).json({ status: 'error', message: 'Missing required parameters' });
         }
 
-        console.log(`[Call API] StartCall from ${callerName} to receiver ${receiverId}`);
+        // Guard: Don't allow calling yourself
+        if (callerId === receiverId) {
+            return res.status(400).json({ status: 'error', message: 'You cannot call yourself' });
+        }
+
+        console.log(`[Call API] StartCall request: callerId=${callerId} (${callerName}), receiverId=${receiverId}, roomId=${roomId}`);
 
         const token = await generateLiveKitToken(roomId, callerId, callerName);
 
@@ -464,7 +469,7 @@ app.post('/startCall', async (req, res) => {
             .eq('id', receiverId)
             .single();
 
-        const receiverName = receiverProfile ? receiverProfile.full_name : 'User';
+        const receiverName = clientReceiverName || (receiverProfile ? receiverProfile.full_name : 'User');
         const receiverAvatar = receiverProfile ? receiverProfile.avatar_url : '';
 
         const { data: callerProfile } = await supabase
@@ -503,17 +508,20 @@ app.post('/startCall', async (req, res) => {
 
         const payload = {
             type: 'incoming_call',
-            callId: callId,
-            callerId: callerId,
-            callerName: callerName,
-            callerAvatar: callerAvatar || '',
-            roomId: roomId,
-            receiverId: receiverId,
-            orderId: orderId || ''
+            callId: String(callId),
+            callerId: String(callerId),
+            callerName: String(callerName),
+            callerAvatar: String(callerAvatar || ''),
+            roomId: String(roomId),
+            receiverId: String(receiverId),
+            orderId: String(orderId || '')
         };
 
         let targetTokens = await getUserFCMTokens(receiverId);
+        console.log(`[Call API] Active Supabase FCM tokens for receiver ${receiverId}:`, targetTokens);
+        
         if (targetTokens.length === 0 && receiverFCMToken) {
+            console.log(`[Call API] No tokens in DB. Using client-provided receiverFCMToken: ${receiverFCMToken}`);
             targetTokens.push(receiverFCMToken);
         }
 
@@ -522,6 +530,9 @@ app.post('/startCall', async (req, res) => {
             const sendPromises = targetTokens.map(fcmToken => sendFCMNotification(fcmToken, payload));
             const results = await Promise.all(sendPromises);
             notificationSent = results.some(r => r === true);
+            console.log(`[Call API] FCM notifications sent. Success status across devices: ${notificationSent}`);
+        } else {
+            console.warn(`[Call API] WARNING: No FCM tokens found for receiver ${receiverId}. Notification NOT sent.`);
         }
 
         res.json({
